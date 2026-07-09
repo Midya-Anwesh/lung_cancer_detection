@@ -99,12 +99,18 @@ class Patientdb(models.Model):
                                         if 'dtype' in cfg and isinstance(cfg['dtype'], dict) and cfg['dtype'].get('class_name') == 'DTypePolicy':
                                             cfg['dtype'] = cfg['dtype'].get('config', {}).get('name', 'float32')
                                             
-                                        # 2. Fix InputLayer specific fields
+                                        # 2. Pop Keras 3 specific parameters from layer configs
+                                        cfg.pop('quantization_config', None)
+                                        cfg.pop('optional', None)
+                                        cfg.pop('ragged', None)
+                                            
+                                        # 3. Fix InputLayer specific fields
                                         if cfg.get('class_name') == 'InputLayer' or cfg.get('class_name') == 'Input':
                                             layer_config = cfg.get('config', {})
                                             if isinstance(layer_config, dict):
                                                 layer_config.pop('optional', None)
                                                 layer_config.pop('ragged', None)
+                                                layer_config.pop('quantization_config', None)
                                                 if 'batch_shape' in layer_config:
                                                     layer_config['batch_input_shape'] = layer_config.pop('batch_shape')
                                                     
