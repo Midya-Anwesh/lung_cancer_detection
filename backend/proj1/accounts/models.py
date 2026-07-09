@@ -140,9 +140,16 @@ class Patientdb(models.Model):
                 batch_inputs.append(occluded)
                 positions.append((y, x))
 
-        # Run inference in a single batch pass
+        # Run inference in smaller chunks to avoid memory spikes (OOM) on free-tier containers
         batch_inputs = np.stack(batch_inputs, axis=0)
-        preds = session.run(None, {input_name: batch_inputs})[0]
+        preds_list = []
+        chunk_size = 16
+        for i in range(0, len(batch_inputs), chunk_size):
+            chunk = batch_inputs[i:i + chunk_size]
+            chunk_preds = session.run(None, {input_name: chunk})[0]
+            preds_list.append(chunk_preds)
+        
+        preds = np.concatenate(preds_list, axis=0)
 
         # Calculate confidence drop for each position
         for i, (y, x) in enumerate(positions):
