@@ -71,14 +71,14 @@ try:
     )
     print("Model loaded!")
     print(f"  inputs : {[inp.name for inp in model.inputs]}")
-    print(f"  shapes : {[inp.shape.as_list() for inp in model.inputs]}")
+    print(f"  shapes : {[list(inp.shape) for inp in model.inputs]}")
     print(f"  outputs: {[out.name for out in model.outputs]}")
 
     import tf2onnx
     print(f"tf2onnx version: {tf2onnx.__version__}")
 
     # Use the model's actual input shape (replace batch dim with None)
-    input_shape = model.inputs[0].shape.as_list()
+    input_shape = list(model.inputs[0].shape)
     input_shape[0] = None
     print(f"Converting with input shape {input_shape} and opset=13...")
 
