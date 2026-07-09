@@ -84,6 +84,9 @@ class Patientdb(models.Model):
                     # Clean the H5 model configuration dynamically before loading
                     try:
                         logger.info("Checking and patching model configuration in H5 file...")
+                        is_keras_3 = tf.keras.__version__.startswith('3')
+                        logger.info("Detected Keras version: %s (Keras 3: %s)", tf.keras.__version__, is_keras_3)
+
                         with h5py.File(model_path, 'r+') as f:
                             if 'model_config' in f.attrs:
                                 raw_config = f.attrs['model_config']
@@ -95,25 +98,27 @@ class Patientdb(models.Model):
                                 # Recursive cleaner
                                 def clean_config(cfg):
                                     if isinstance(cfg, dict):
-                                        # 1. Clean Keras 3 DTypePolicy to Keras 2 string
-                                        if 'dtype' in cfg and isinstance(cfg['dtype'], dict) and cfg['dtype'].get('class_name') == 'DTypePolicy':
-                                            cfg['dtype'] = cfg['dtype'].get('config', {}).get('name', 'float32')
-                                            
-                                        # 2. Pop Keras 3 specific parameters from layer configs
-                                        cfg.pop('quantization_config', None)
-                                        cfg.pop('optional', None)
-                                        cfg.pop('ragged', None)
-                                            
-                                        # 3. Fix InputLayer specific fields
-                                        if cfg.get('class_name') == 'InputLayer' or cfg.get('class_name') == 'Input':
-                                            layer_config = cfg.get('config', {})
-                                            if isinstance(layer_config, dict):
-                                                layer_config.pop('optional', None)
-                                                layer_config.pop('ragged', None)
-                                                layer_config.pop('quantization_config', None)
-                                                if 'batch_shape' in layer_config:
-                                                    layer_config['batch_input_shape'] = layer_config.pop('batch_shape')
-                                                    
+                                        if is_keras_3:
+                                            # Keras 3 bug: writes quantization_config to Dense/etc configs but fails to deserialize it
+                                            cfg.pop('quantization_config', None)
+                                        else:
+                                            # Keras 2: Clean Keras 3 structures to Keras 2 equivalents
+                                            if 'dtype' in cfg and isinstance(cfg['dtype'], dict) and cfg['dtype'].get('class_name') == 'DTypePolicy':
+                                                cfg['dtype'] = cfg['dtype'].get('config', {}).get('name', 'float32')
+                                                
+                                            cfg.pop('quantization_config', None)
+                                            cfg.pop('optional', None)
+                                            cfg.pop('ragged', None)
+                                                
+                                            if cfg.get('class_name') in ('InputLayer', 'Input'):
+                                                layer_config = cfg.get('config', {})
+                                                if isinstance(layer_config, dict):
+                                                    layer_config.pop('optional', None)
+                                                    layer_config.pop('ragged', None)
+                                                    layer_config.pop('quantization_config', None)
+                                                    if 'batch_shape' in layer_config:
+                                                        layer_config['batch_input_shape'] = layer_config.pop('batch_shape')
+                                                        
                                         # Recurse
                                         for val in cfg.values():
                                             clean_config(val)
