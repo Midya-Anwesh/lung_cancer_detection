@@ -8,7 +8,7 @@ numpy
 pandas
 opencv-python-headless
 Pillow
-tensorflow-cpu
+tensorflow-cpu==2.15.0
 scikit-learn
 matplotlib
 scipy

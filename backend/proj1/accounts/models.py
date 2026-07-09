@@ -70,6 +70,9 @@ class Patientdb(models.Model):
                 if _LUNG_MODEL is None:
 
                     from tensorflow.keras.models import load_model
+                    import tensorflow as tf
+                    import h5py
+                    import json
 
                     model_path = os.path.join(
                         os.path.dirname(
@@ -78,12 +81,59 @@ class Patientdb(models.Model):
                         'best_model (1).h5'
                     )
 
-                    logger.info(
-                        "Loading lung model from %s",
-                        model_path
-                    )
+                    # Clean the H5 model configuration dynamically before loading
+                    try:
+                        logger.info("Checking and patching model configuration in H5 file...")
+                        with h5py.File(model_path, 'r+') as f:
+                            if 'model_config' in f.attrs:
+                                raw_config = f.attrs['model_config']
+                                if isinstance(raw_config, bytes):
+                                    raw_config = raw_config.decode('utf-8')
+                                
+                                config_dict = json.loads(raw_config)
+                                
+                                # Recursive cleaner
+                                def clean_config(cfg):
+                                    if isinstance(cfg, dict):
+                                        # 1. Clean Keras 3 DTypePolicy to Keras 2 string
+                                        if 'dtype' in cfg and isinstance(cfg['dtype'], dict) and cfg['dtype'].get('class_name') == 'DTypePolicy':
+                                            cfg['dtype'] = cfg['dtype'].get('config', {}).get('name', 'float32')
+                                            
+                                        # 2. Fix InputLayer specific fields
+                                        if cfg.get('class_name') == 'InputLayer' or cfg.get('class_name') == 'Input':
+                                            layer_config = cfg.get('config', {})
+                                            if isinstance(layer_config, dict):
+                                                layer_config.pop('optional', None)
+                                                layer_config.pop('ragged', None)
+                                                if 'batch_shape' in layer_config:
+                                                    layer_config['batch_input_shape'] = layer_config.pop('batch_shape')
+                                                    
+                                        # Recurse
+                                        for val in cfg.values():
+                                            clean_config(val)
+                                    elif isinstance(cfg, list):
+                                        for item in cfg:
+                                            clean_config(item)
+                                            
+                                clean_config(config_dict)
+                                f.attrs['model_config'] = json.dumps(config_dict).encode('utf-8')
+                                logger.info("Model configuration in H5 file patched successfully!")
+                    except Exception as e:
+                        logger.warning("Could not patch H5 model config: %s. Proceeding to load normally.", e)
 
-                    _LUNG_MODEL = load_model(model_path)
+                    # Define PatchedInputLayer as a fallback/safety measure
+                    class PatchedInputLayer(tf.keras.layers.InputLayer):
+                        def __init__(self, *args, **kwargs):
+                            kwargs.pop('optional', None)
+                            kwargs.pop('ragged', None)
+                            if 'batch_shape' in kwargs:
+                                kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
+                            super().__init__(*args, **kwargs)
+
+                    _LUNG_MODEL = load_model(
+                        model_path,
+                        custom_objects={'InputLayer': PatchedInputLayer}
+                    )
 
         return _LUNG_MODEL
 
