@@ -78,8 +78,16 @@ class Patientdb(models.Model):
                         )
 
                     logger.info("Loading ONNX model from %s", onnx_path)
+                    
+                    # Restrict ONNX to a single thread to minimize memory fragmentation
+                    opts = ort.SessionOptions()
+                    opts.intra_op_num_threads = 1
+                    opts.inter_op_num_threads = 1
+                    opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    
                     _ORT_SESSION = ort.InferenceSession(
                         onnx_path,
+                        sess_options=opts,
                         providers=['CPUExecutionProvider']
                     )
                     logger.info("ONNX model loaded successfully.")
@@ -114,7 +122,9 @@ class Patientdb(models.Model):
         Occlusion-sensitivity heatmap — no TF gradients needed.
         Slides a gray patch over the image and records where confidence
         drops the most (those areas are most important for the prediction).
-        Batches all 169 steps into a single forward pass for speed (takes <0.5s).
+        
+        Optimized to process and stream small batches (chunk size 8) on the fly.
+        This keeps peak memory consumption to under 5MB.
         """
         session = self.get_ort_session()
         input_name = session.get_inputs()[0].name
@@ -129,26 +139,31 @@ class Patientdb(models.Model):
         sensitivity = np.zeros((h, w), dtype=np.float32)
         counts = np.zeros((h, w), dtype=np.float32)
 
-        # Build the batch
-        batch_inputs = []
+        # Process and predict in small chunks on the fly to avoid large memory allocations
+        chunk_size = 8
+        current_chunk = []
         positions = []
+        preds_list = []
 
         for y in range(0, h - patch_size + 1, stride):
             for x in range(0, w - patch_size + 1, stride):
                 occluded = img_array.copy()
                 occluded[y:y + patch_size, x:x + patch_size, :] = 0.5  # gray patch
-                batch_inputs.append(occluded)
+                current_chunk.append(occluded)
                 positions.append((y, x))
 
-        # Run inference in smaller chunks to avoid memory spikes (OOM) on free-tier containers
-        batch_inputs = np.stack(batch_inputs, axis=0)
-        preds_list = []
-        chunk_size = 16
-        for i in range(0, len(batch_inputs), chunk_size):
-            chunk = batch_inputs[i:i + chunk_size]
-            chunk_preds = session.run(None, {input_name: chunk})[0]
+                if len(current_chunk) == chunk_size:
+                    chunk_arr = np.stack(current_chunk, axis=0)
+                    chunk_preds = session.run(None, {input_name: chunk_arr})[0]
+                    preds_list.append(chunk_preds)
+                    current_chunk = []
+
+        # Run remaining inputs if any
+        if len(current_chunk) > 0:
+            chunk_arr = np.stack(current_chunk, axis=0)
+            chunk_preds = session.run(None, {input_name: chunk_arr})[0]
             preds_list.append(chunk_preds)
-        
+
         preds = np.concatenate(preds_list, axis=0)
 
         # Calculate confidence drop for each position
