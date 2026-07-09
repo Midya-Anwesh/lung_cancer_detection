@@ -5,11 +5,6 @@ django-cors-headers
 djangorestframework
 django-rest-knox
 numpy
-pandas
 opencv-python-headless
 Pillow
 tensorflow-cpu
-scikit-learn
-matplotlib
-scipy
-joblib
