@@ -157,17 +157,24 @@ class Patientdb(models.Model):
         counts = np.maximum(counts, 1)
         heatmap = sensitivity / counts
 
-        # Normalize and threshold low-activation regions
+        # Normalize
         heatmap = np.maximum(heatmap, 0)
         if np.max(heatmap) > 1e-8:
             heatmap = heatmap / np.max(heatmap)
-        heatmap = np.where(heatmap > 0.3, heatmap, 0)
+
+        # Blur away the hard block edges from the 56x56 coarse grid
+        heatmap = cv2.GaussianBlur(heatmap, (57, 57), sigmaX=20, sigmaY=20)
+
+        # Re-normalize after blur and apply soft threshold
+        if np.max(heatmap) > 1e-8:
+            heatmap = heatmap / np.max(heatmap)
+        heatmap = np.where(heatmap > 0.2, heatmap, 0)
 
         # Overlay on original image using JET colormap
         original_bgr = cv2.cvtColor(np.array(original_img), cv2.COLOR_RGB2BGR)
         heatmap_uint8 = np.uint8(255 * heatmap)
         heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
-        superimposed = cv2.addWeighted(original_bgr, 0.7, heatmap_colored, 0.5, 0)
+        superimposed = cv2.addWeighted(original_bgr, 0.7, heatmap_colored, 0.4, 0)
         final_img = Image.fromarray(cv2.cvtColor(superimposed, cv2.COLOR_BGR2RGB))
 
         buffer = BytesIO()
