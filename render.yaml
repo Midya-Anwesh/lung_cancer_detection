@@ -16,3 +16,6 @@ services:
         value: "False"
       - key: PYTHON_VERSION
         value: "3.10.0"
+      - key: CI
+        value: "false"
+
