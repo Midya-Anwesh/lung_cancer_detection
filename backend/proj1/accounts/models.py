@@ -119,59 +119,40 @@ class Patientdb(models.Model):
 
     def generate_heatmap(self, class_idx, img_array, original_img):
         """
-        Occlusion-sensitivity heatmap — no TF gradients needed.
-        Slides a gray patch over the image and records where confidence
-        drops the most (those areas are most important for the prediction).
-        
-        Optimized to process and stream small batches (chunk size 8) on the fly.
-        This keeps peak memory consumption to under 5MB.
+        Coarse occlusion-sensitivity heatmap (4x4 grid = 16 + 1 passes).
+        Uses 56x56 patches with stride 56 so only 17 forward passes run,
+        each at batch_size=1 to keep activation memory under 250MB per pass.
+        The coarse heatmap is bicubically upscaled to 224x224 for display.
         """
         session = self.get_ort_session()
         input_name = session.get_inputs()[0].name
 
-        # Baseline confidence for the predicted class
+        # Baseline confidence for the predicted class (batch=1)
         baseline_inp = np.expand_dims(img_array, axis=0)
-        baseline_conf = session.run(None, {input_name: baseline_inp})[0][0][class_idx]
+        baseline_conf = float(
+            session.run(None, {input_name: baseline_inp})[0][0][class_idx]
+        )
+        del baseline_inp  # free immediately
 
-        patch_size = 32
-        stride = 16
+        patch_size = 56
+        stride = 56
         h, w = 224, 224
         sensitivity = np.zeros((h, w), dtype=np.float32)
         counts = np.zeros((h, w), dtype=np.float32)
 
-        # Process and predict in small chunks on the fly to avoid large memory allocations
-        chunk_size = 8
-        current_chunk = []
-        positions = []
-        preds_list = []
-
+        # 4x4 grid = 16 positions, one forward pass at a time (batch_size=1)
         for y in range(0, h - patch_size + 1, stride):
             for x in range(0, w - patch_size + 1, stride):
                 occluded = img_array.copy()
-                occluded[y:y + patch_size, x:x + patch_size, :] = 0.5  # gray patch
-                current_chunk.append(occluded)
-                positions.append((y, x))
-
-                if len(current_chunk) == chunk_size:
-                    chunk_arr = np.stack(current_chunk, axis=0)
-                    chunk_preds = session.run(None, {input_name: chunk_arr})[0]
-                    preds_list.append(chunk_preds)
-                    current_chunk = []
-
-        # Run remaining inputs if any
-        if len(current_chunk) > 0:
-            chunk_arr = np.stack(current_chunk, axis=0)
-            chunk_preds = session.run(None, {input_name: chunk_arr})[0]
-            preds_list.append(chunk_preds)
-
-        preds = np.concatenate(preds_list, axis=0)
-
-        # Calculate confidence drop for each position
-        for i, (y, x) in enumerate(positions):
-            conf = preds[i][class_idx]
-            drop = float(baseline_conf - conf)
-            sensitivity[y:y + patch_size, x:x + patch_size] += drop
-            counts[y:y + patch_size, x:x + patch_size] += 1
+                occluded[y:y + patch_size, x:x + patch_size, :] = 0.5
+                inp = np.expand_dims(occluded, axis=0)
+                conf = float(
+                    session.run(None, {input_name: inp})[0][0][class_idx]
+                )
+                del inp, occluded  # free activation memory immediately
+                drop = baseline_conf - conf
+                sensitivity[y:y + patch_size, x:x + patch_size] += drop
+                counts[y:y + patch_size, x:x + patch_size] += 1
 
         counts = np.maximum(counts, 1)
         heatmap = sensitivity / counts
