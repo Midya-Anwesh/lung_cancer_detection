@@ -4,6 +4,7 @@ services:
     runtime: python
     rootDir: backend/proj1
     buildCommand: |
+      set -e
       cd ../../frontend && npm install && npm run build
       cd ../backend/proj1
       pip install -r requirements.txt
