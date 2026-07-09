@@ -143,7 +143,8 @@ class Patientdb(models.Model):
 
                     _LUNG_MODEL = load_model(
                         model_path,
-                        custom_objects={'InputLayer': PatchedInputLayer}
+                        custom_objects={'InputLayer': PatchedInputLayer},
+                        compile=False
                     )
 
         return _LUNG_MODEL
