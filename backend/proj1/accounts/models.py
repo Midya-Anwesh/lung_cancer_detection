@@ -7,17 +7,14 @@ from django.core.files.base import ContentFile
 
 import os
 import logging
-from io import BytesIO
 from threading import Lock
 
-import cv2
 import numpy as np
-import tensorflow as tf
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-_LUNG_MODEL = None
+_ORT_SESSION = None
 _MODEL_LOCK = Lock()
 
 
@@ -62,359 +59,79 @@ class Patientdb(models.Model):
     ]
 
     @staticmethod
-    def get_lung_model():
-        global _LUNG_MODEL
+    def get_ort_session():
+        """Load ONNX runtime inference session (lazy, singleton)."""
+        global _ORT_SESSION
 
-        if _LUNG_MODEL is None:
+        if _ORT_SESSION is None:
             with _MODEL_LOCK:
-                if _LUNG_MODEL is None:
+                if _ORT_SESSION is None:
+                    import onnxruntime as ort
 
-                    from tensorflow.keras.models import load_model
-                    import tensorflow as tf
-                    import h5py
-                    import json
-
-                    model_path = os.path.join(
-                        os.path.dirname(
-                            os.path.abspath(__file__)
-                        ),
-                        'best_model (1).h5'
+                    onnx_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        'model.onnx'
                     )
 
-                    # Clean the H5 model configuration dynamically before loading
-                    try:
-                        logger.info("Checking and patching model configuration in H5 file...")
-                        is_keras_3 = tf.keras.__version__.startswith('3')
-                        logger.info("Detected Keras version: %s (Keras 3: %s)", tf.keras.__version__, is_keras_3)
+                    if not os.path.exists(onnx_path):
+                        raise FileNotFoundError(
+                            f"ONNX model not found at {onnx_path}. "
+                            "Run accounts/convert_model.py during the build step."
+                        )
 
-                        with h5py.File(model_path, 'r+') as f:
-                            if 'model_config' in f.attrs:
-                                raw_config = f.attrs['model_config']
-                                if isinstance(raw_config, bytes):
-                                    raw_config = raw_config.decode('utf-8')
-                                
-                                config_dict = json.loads(raw_config)
-                                
-                                # Recursive cleaner
-                                def clean_config(cfg):
-                                    if isinstance(cfg, dict):
-                                        if is_keras_3:
-                                            # Keras 3 bug: writes quantization_config to Dense/etc configs but fails to deserialize it
-                                            cfg.pop('quantization_config', None)
-                                        else:
-                                            # Keras 2: Clean Keras 3 structures to Keras 2 equivalents
-                                            if 'dtype' in cfg and isinstance(cfg['dtype'], dict) and cfg['dtype'].get('class_name') == 'DTypePolicy':
-                                                cfg['dtype'] = cfg['dtype'].get('config', {}).get('name', 'float32')
-                                                
-                                            cfg.pop('quantization_config', None)
-                                            cfg.pop('optional', None)
-                                            cfg.pop('ragged', None)
-                                                
-                                            if cfg.get('class_name') in ('InputLayer', 'Input'):
-                                                layer_config = cfg.get('config', {})
-                                                if isinstance(layer_config, dict):
-                                                    layer_config.pop('optional', None)
-                                                    layer_config.pop('ragged', None)
-                                                    layer_config.pop('quantization_config', None)
-                                                    if 'batch_shape' in layer_config:
-                                                        layer_config['batch_input_shape'] = layer_config.pop('batch_shape')
-                                                        
-                                        # Recurse
-                                        for val in cfg.values():
-                                            clean_config(val)
-                                    elif isinstance(cfg, list):
-                                        for item in cfg:
-                                            clean_config(item)
-                                            
-                                clean_config(config_dict)
-                                f.attrs['model_config'] = json.dumps(config_dict).encode('utf-8')
-                                logger.info("Model configuration in H5 file patched successfully!")
-                    except Exception as e:
-                        logger.warning("Could not patch H5 model config: %s. Proceeding to load normally.", e)
-
-                    # Define PatchedInputLayer as a fallback/safety measure
-                    class PatchedInputLayer(tf.keras.layers.InputLayer):
-                        def __init__(self, *args, **kwargs):
-                            kwargs.pop('optional', None)
-                            kwargs.pop('ragged', None)
-                            if 'batch_shape' in kwargs:
-                                kwargs['batch_input_shape'] = kwargs.pop('batch_shape')
-                            super().__init__(*args, **kwargs)
-
-                    _LUNG_MODEL = load_model(
-                        model_path,
-                        custom_objects={'InputLayer': PatchedInputLayer},
-                        compile=False
+                    logger.info("Loading ONNX model from %s", onnx_path)
+                    _ORT_SESSION = ort.InferenceSession(
+                        onnx_path,
+                        providers=['CPUExecutionProvider']
                     )
+                    logger.info("ONNX model loaded successfully.")
 
-        return _LUNG_MODEL
-
-    @staticmethod
-    def get_last_conv_layer(model):
-        """
-        Automatically find last Conv2D layer.
-        """
-
-        for layer in reversed(model.layers):
-
-            if isinstance(layer, tf.keras.layers.Conv2D):
-                return layer.name
-
-        raise ValueError(
-            "No Conv2D layer found in model."
-        )
+        return _ORT_SESSION
 
     def classify_image(self):
+        """Run inference using ONNX Runtime (no TensorFlow at runtime)."""
+        session = self.get_ort_session()
 
-        model = self.get_lung_model()
-
-        # Open image safely
         self.pimage.open()
-
         img = Image.open(self.pimage).convert("RGB")
-
         img = img.resize((224, 224))
 
-        img_array = np.array(img)
+        img_array = np.array(img, dtype=np.float32) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
 
-        img_array = img_array.astype(
-            np.float32
-        ) / 255.0
+        input_name = session.get_inputs()[0].name
+        pred = session.run(None, {input_name: img_array})[0]
 
-        img_array = np.expand_dims(
-            img_array,
-            axis=0
-        )
+        predicted_class = int(np.argmax(pred))
+        confidence = float(np.max(pred) * 100)
+        label = self.CLASS_NAMES[predicted_class]
 
-        pred = model.predict(
-            img_array,
-            verbose=0
-        )
+        logger.info("Prediction: %s (%.2f%%)", label, confidence)
 
-        predicted_class = int(
-            np.argmax(pred)
-        )
-
-        confidence = float(
-            np.max(pred) * 100
-        )
-
-        label = self.CLASS_NAMES[
-            predicted_class
-        ]
-
-        logger.info(
-            "Prediction: %s (%.2f%%)",
-            label,
-            confidence
-        )
-
-        return (
-            label,
-            confidence,
-            predicted_class
-        )
-
-    def generate_gradcam(self, class_idx):
-
-        model = self.get_lung_model()
-
-        last_conv_layer_name = (
-            self.get_last_conv_layer(model)
-        )
-
-        logger.info(
-            "Using GradCAM layer: %s",
-            last_conv_layer_name
-        )
-
-        # Load image
-        img = Image.open(
-            self.pimage
-        ).convert("RGB")
-
-        img = img.resize(
-            (224, 224)
-        )
-
-        img_array = np.array(
-            img,
-            dtype=np.float32
-        )
-
-        img_array = (
-            img_array / 255.0
-        )
-
-        img_array = np.expand_dims(
-            img_array,
-            axis=0
-        )
-
-        grad_model = tf.keras.models.Model(
-            inputs=model.inputs,
-            outputs=[
-                model.get_layer(
-                    last_conv_layer_name
-                ).output,
-                model.output
-            ]
-        )
-
-        with tf.GradientTape() as tape:
-
-            conv_outputs, predictions = (
-                grad_model(img_array)
-            )
-
-            loss = predictions[:, class_idx]
-
-        grads = tape.gradient(
-            loss,
-            conv_outputs
-        )
-
-        pooled_grads = tf.reduce_mean(
-            grads,
-            axis=(0, 1, 2)
-        )
-
-        conv_outputs = conv_outputs[0]
-
-        heatmap = (
-            conv_outputs
-            @ pooled_grads[..., tf.newaxis]
-        )
-
-        heatmap = tf.squeeze(
-            heatmap
-        )
-
-        heatmap = np.maximum(
-            heatmap,
-            0
-        )
-
-        heatmap = heatmap / (
-            np.max(heatmap) + 1e-8
-        )
-
-        heatmap = np.where(
-            heatmap > 0.4,
-            heatmap,
-            0
-        )
-
-        original_img = cv2.cvtColor(
-            np.array(img),
-            cv2.COLOR_RGB2BGR
-        )
-
-        heatmap = cv2.resize(
-            heatmap,
-            (224, 224)
-        )
-
-        heatmap = np.uint8(
-            255 * heatmap
-        )
-
-        heatmap = cv2.applyColorMap(
-            heatmap,
-            cv2.COLORMAP_JET
-        )
-
-        superimposed_img = (
-            cv2.addWeighted(
-                original_img,
-                0.75,
-                heatmap,
-                0.45,
-                0
-            )
-        )
-
-        final_img = Image.fromarray(
-            cv2.cvtColor(
-                superimposed_img,
-                cv2.COLOR_BGR2RGB
-            )
-        )
-
-        buffer = BytesIO()
-
-        final_img.save(
-            buffer,
-            format="PNG"
-        )
-
-        filename = (
-            f"heatmap_{self.pk}.png"
-        )
-
-        self.heatmap_image.save(
-            filename,
-            ContentFile(
-                buffer.getvalue()
-            ),
-            save=False
-        )
+        return label, confidence, predicted_class
 
     def save(self, *args, **kwargs):
 
-        is_new = self.pk is None
-
         super().save(*args, **kwargs)
 
-        # Skip if no image
-        if not self.pimage:
-            return
-
-        # Already classified
-        if self.classified:
+        # Skip if no image or already classified
+        if not self.pimage or self.classified:
             return
 
         try:
+            label, confidence, _ = self.classify_image()
 
-            (
-                label,
-                confidence,
-                class_idx
-            ) = self.classify_image()
-
-            self.classified = label
-
-            self.confidence_score = (
-                confidence
+            Patientdb.objects.filter(pk=self.pk).update(
+                classified=label,
+                confidence_score=confidence,
             )
 
-            self.generate_gradcam(
-                class_idx
-            )
-
-            Patientdb.objects.filter(
-                pk=self.pk
-            ).update(
-                classified=self.classified,
-                confidence_score=self.confidence_score,
-                heatmap_image=self.heatmap_image
-            )
-
-            logger.info(
-                "Classification completed for patient %s",
-                self.pk
-            )
+            logger.info("Classification completed for patient %s: %s (%.2f%%)", self.pk, label, confidence)
 
         except Exception:
+            logger.exception("Classification failed for patient %s", self.pk)
 
-            logger.exception(
-                "Classification failed for patient %s",
-                self.pk
-            )
-
-            Patientdb.objects.filter(
-                pk=self.pk
-            ).update(
+            Patientdb.objects.filter(pk=self.pk).update(
                 classified="Classification failed"
             )
 

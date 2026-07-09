@@ -7,4 +7,5 @@ django-rest-knox
 numpy
 opencv-python-headless
 Pillow
-tensorflow-cpu
+onnxruntime
+h5py
