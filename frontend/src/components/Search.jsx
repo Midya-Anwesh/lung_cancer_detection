@@ -2,7 +2,7 @@ import React from 'react'
 import toast from "react-hot-toast";
 import './Search.css'
 import { useState } from 'react'
-import axios from 'axios'
+import api from '../api'
 
 const Search = () => {
 
@@ -17,7 +17,7 @@ const Search = () => {
     }
     else {
       try {
-        const response = await axios.get(`http://127.0.0.1:8000/api/search_patient/?name=${searchPatient}`);
+        const response = await api.get(`/api/search_patient/?name=${searchPatient}`);
         // console.log(response.data);
         if (response.status === 200) {
           toast.success(`${searchPatient} details found`);
@@ -112,7 +112,7 @@ const Search = () => {
             <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}>{patient.state}</td>
             <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}>{patient.gender}</td>
             <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}>{patient.location}</td>
-            <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}><a href={`http://127.0.0.1:8000/${patient.pimage}`}> View </a></td>
+            <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}><a href={`/media/${patient.pimage}`}> View </a></td>
             <td style={{ borderBottom: '1px solid #ddd', padding: '8px' }}>{patient.classified}</td>
           </tr>
         )}

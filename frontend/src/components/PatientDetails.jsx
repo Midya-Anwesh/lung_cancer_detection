@@ -13,7 +13,7 @@ import {
 
 } from "react-icons/fa";
 import React, { useEffect, useState, useRef } from 'react'
-import axios from 'axios'
+import api from '../api'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ImageZoom } from "../image-zoom.tsx";
 
@@ -28,8 +28,8 @@ const PatientDetails = () => {
 
   useEffect(() => {
 
-    axios
-      .get(`http://127.0.0.1:8000/api/patient_details/?id=${id}`)
+    api
+      .get(`/api/patient_details/?id=${id}`)
 
       .then(response => {
 
@@ -187,9 +187,9 @@ const handleShare = async () => {
 
     setShowDeleteModal(false)
 
-    await axios.delete(
+    await api.delete(
 
-      `http://127.0.0.1:8000/api/delete_patient/${id}/`
+      `/api/delete_patient/${id}/`
     )
 
 

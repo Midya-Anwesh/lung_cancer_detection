@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import axios from 'axios';
+import api from '../api';
 const Editpatient = () => {
     const param = useParams();
     const [patientdata2, setPatient] = useState(
@@ -57,7 +57,7 @@ const Editpatient = () => {
         const fetchData = async () => {
             // http://127.0.0.1:8000/api/edit_patient/?id=18
             try {
-                const response = await axios.get(`http://127.0.0.1:8000/api/edit_patient/?id=${id}`);
+                const response = await api.get(`/api/edit_patient/?id=${id}`);
                 setUserData(response.data);
                 // console.log(Userdata)
             } catch (error) {

@@ -5,7 +5,7 @@ import { CCardBody,CCardTitle, CCardText,CButton } from '@coreui/react';
 import './Doctor.css'
 import { useState } from 'react';
 import { useEffect } from 'react';
-import axios from 'axios';
+import api from '../api';
 
 // function Udoctor () {
 
@@ -37,7 +37,7 @@ const Doctor =()=>{
 
     useEffect(() => {
     const fetchData = async () => {
-      const response = await axios.get(`http://127.0.0.1:8000/api/user?username=${name}`);
+      const response = await api.get(`/api/user?username=${name}`);
       setUserData(response.data);
       console.log(userData)
     };

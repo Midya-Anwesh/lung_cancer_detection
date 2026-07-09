@@ -5,7 +5,7 @@ import React from "react";
 import './component.scss';
 // import 'bootstrap/dist/css/bootstrap.css';
 import { useState } from "react";
-import axios from "axios";
+import api from "../api";
 import { useNavigate } from "react-router-dom";
 import './Patientdata.css'
 const Patient = () => {
@@ -94,7 +94,7 @@ const Patient = () => {
 
     
      try {
-      const response = await axios.post('http://127.0.0.1:8000/api/patient/', patientformdata);
+      const response = await api.post('/api/patient/', patientformdata);
       console.log(response.status)
       console.log(response)
       if (response.status===201) {

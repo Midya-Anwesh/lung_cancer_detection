@@ -3,7 +3,7 @@
 import toast from "react-hot-toast";
 import React, { useState } from "react";
 
-import axios from "axios";
+import api from "../api";
 
 import { useNavigate, Link } from "react-router-dom";
 
@@ -63,9 +63,9 @@ const Signup = () => {
 
     try {
 
-      await axios.post(
+      await api.post(
 
-        "http://127.0.0.1:8000/api/register/",
+        "/api/register/",
 
         {
 
