@@ -10,6 +10,7 @@ services:
       pip install -r requirements.txt
       pip install tensorflow-cpu tf2onnx
       python accounts/convert_model.py
+      ls -la accounts
       pip uninstall -y tensorflow-cpu tf2onnx keras
       python manage.py collectstatic --noinput
       python manage.py migrate
