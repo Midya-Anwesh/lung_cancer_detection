@@ -1,14 +1,12 @@
-
-
-
-
 from django.db import models
 from django.core.files.base import ContentFile
 
 import os
 import logging
+from io import BytesIO
 from threading import Lock
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -97,10 +95,10 @@ class Patientdb(models.Model):
         img = img.resize((224, 224))
 
         img_array = np.array(img, dtype=np.float32) / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
+        img_array_batch = np.expand_dims(img_array, axis=0)
 
         input_name = session.get_inputs()[0].name
-        pred = session.run(None, {input_name: img_array})[0]
+        pred = session.run(None, {input_name: img_array_batch})[0]
 
         predicted_class = int(np.argmax(pred))
         confidence = float(np.max(pred) * 100)
@@ -108,7 +106,66 @@ class Patientdb(models.Model):
 
         logger.info("Prediction: %s (%.2f%%)", label, confidence)
 
-        return label, confidence, predicted_class
+        # Return img_array (HWC, no batch) and PIL img for heatmap use
+        return label, confidence, predicted_class, img_array, img
+
+    def generate_heatmap(self, class_idx, img_array, original_img):
+        """
+        Occlusion-sensitivity heatmap — no TF gradients needed.
+        Slides a gray patch over the image and records where confidence
+        drops the most (those areas are most important for the prediction).
+        Uses ~169 fast ONNX forward passes (32x32 patch, stride 16).
+        """
+        session = self.get_ort_session()
+        input_name = session.get_inputs()[0].name
+
+        # Baseline confidence for the predicted class
+        baseline_inp = np.expand_dims(img_array, axis=0)
+        baseline_conf = session.run(None, {input_name: baseline_inp})[0][0][class_idx]
+
+        patch_size = 32
+        stride = 16
+        h, w = 224, 224
+        sensitivity = np.zeros((h, w), dtype=np.float32)
+        counts = np.zeros((h, w), dtype=np.float32)
+
+        for y in range(0, h - patch_size + 1, stride):
+            for x in range(0, w - patch_size + 1, stride):
+                occluded = img_array.copy()
+                occluded[y:y + patch_size, x:x + patch_size, :] = 0.5  # gray patch
+                inp = np.expand_dims(occluded, axis=0)
+                conf = session.run(None, {input_name: inp})[0][0][class_idx]
+                drop = float(baseline_conf - conf)
+                sensitivity[y:y + patch_size, x:x + patch_size] += drop
+                counts[y:y + patch_size, x:x + patch_size] += 1
+
+        counts = np.maximum(counts, 1)
+        heatmap = sensitivity / counts
+
+        # Normalize and threshold low-activation regions
+        heatmap = np.maximum(heatmap, 0)
+        if np.max(heatmap) > 1e-8:
+            heatmap = heatmap / np.max(heatmap)
+        heatmap = np.where(heatmap > 0.3, heatmap, 0)
+
+        # Overlay on original image using JET colormap
+        original_bgr = cv2.cvtColor(np.array(original_img), cv2.COLOR_RGB2BGR)
+        heatmap_uint8 = np.uint8(255 * heatmap)
+        heatmap_colored = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+        superimposed = cv2.addWeighted(original_bgr, 0.7, heatmap_colored, 0.5, 0)
+        final_img = Image.fromarray(cv2.cvtColor(superimposed, cv2.COLOR_BGR2RGB))
+
+        buffer = BytesIO()
+        final_img.save(buffer, format="PNG")
+
+        filename = f"heatmap_{self.pk}.png"
+        self.heatmap_image.save(
+            filename,
+            ContentFile(buffer.getvalue()),
+            save=False
+        )
+
+        logger.info("Heatmap saved for patient %s", self.pk)
 
     def save(self, *args, **kwargs):
 
@@ -119,14 +176,24 @@ class Patientdb(models.Model):
             return
 
         try:
-            label, confidence, _ = self.classify_image()
+            label, confidence, class_idx, img_array, pil_img = self.classify_image()
+
+            # Generate heatmap (non-fatal if it fails)
+            try:
+                self.generate_heatmap(class_idx, img_array, pil_img)
+            except Exception:
+                logger.exception("Heatmap generation failed for patient %s", self.pk)
 
             Patientdb.objects.filter(pk=self.pk).update(
                 classified=label,
                 confidence_score=confidence,
+                heatmap_image=self.heatmap_image.name if self.heatmap_image else None,
             )
 
-            logger.info("Classification completed for patient %s: %s (%.2f%%)", self.pk, label, confidence)
+            logger.info(
+                "Classification completed for patient %s: %s (%.2f%%)",
+                self.pk, label, confidence
+            )
 
         except Exception:
             logger.exception("Classification failed for patient %s", self.pk)
@@ -134,284 +201,3 @@ class Patientdb(models.Model):
             Patientdb.objects.filter(pk=self.pk).update(
                 classified="Classification failed"
             )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# from django.db import models
-# import os
-# import traceback
-
-# import cv2
-# import numpy as np
-# import tensorflow as tf
-
-# from django.core.files.base import ContentFile
-
-# from io import BytesIO
-
-# from PIL import Image
-
-# _LUNG_MODEL = None
-
-
-
- 
-    
-    
-# class Patientdb(models.Model):
-#     name = models.CharField(max_length=100)
-#     email = models.EmailField()
-#     dob = models.DateField(auto_now=False, auto_now_add=False)
-#     state = models.CharField(max_length=50)
-#     gender = models.CharField(max_length=100)
-#     location = models.CharField(max_length=100)
-#     pimage = models.ImageField()
-#     classified = models.CharField(max_length=200,blank=True)
-
-#     heatmap_image = models.ImageField(
-#         upload_to='heatmaps/',
-#         blank=True,
-#         null=True
-#     )
-
-#     confidence_score = models.FloatField(
-#         blank=True,
-#         null=True
-#     )
-
-#     uploaded = models.DateTimeField(auto_now_add=True) 
-#     phone_number = models.CharField(max_length=100)
-
-#     @staticmethod
-#     def get_lung_model():
-#         global _LUNG_MODEL
-
-#         if _LUNG_MODEL is not None:
-#             return _LUNG_MODEL
-
-#         from tensorflow.keras.models import load_model
-
-#         model_path = os.path.join(
-#             os.path.dirname(os.path.abspath(__file__)),
-#             'best_model (1).h5'
-#         )
-
-#         _LUNG_MODEL = load_model(model_path)
-
-#         return _LUNG_MODEL
-
-#     def classify_image(self):
-
-#         import cv2
-#         import numpy as np
-
-#         class_names = ['Benign case', 'Malignant case', 'Normal case']
-
-#         model = self.get_lung_model()
-
-#         # Read image
-#         img_array = cv2.imread(self.pimage.path)
-
-#         if img_array is None:
-#             raise ValueError(f'Could not read image: {self.pimage.path}')
-
-#         # Convert BGR → RGB
-#         img_array = cv2.cvtColor(
-#             img_array,
-#             cv2.COLOR_BGR2RGB
-#         )
-
-#         # Resize
-#         img_array = cv2.resize(
-#             img_array,
-#             (224, 224)
-#         )
-
-#         # Normalize EXACTLY like training
-#         img_array = img_array.astype(np.float32) / 255.0
-
-#         # Add batch dimension
-#         img_array = np.expand_dims(
-#             img_array,
-#             axis=0
-#         )
-
-#         # Predict
-#         pred = model.predict(img_array)
-
-#         print("RAW PREDICTION:", pred)
-
-#         predicted_class = np.argmax(pred)
-
-#         confidence = float(np.max(pred) * 100)
-
-#         result = (
-#             f"{class_names[predicted_class]} "
-#             f"({confidence:.2f}%)"
-#         )
-
-#         return result
-    
-#     def generate_gradcam(self):
-
-#         class_names = [
-#             'Benign case',
-#             'Malignant case',
-#             'Normal case'
-#         ]
-
-#         model = self.get_lung_model()
-
-#         last_conv_layer_name = "conv5_block16_concat"
-
-#         # Load image
-#         img = tf.keras.preprocessing.image.load_img(
-#             self.pimage.path,
-#             target_size=(224,224)
-#         )
-
-#         img_array = tf.keras.preprocessing.image.img_to_array(img)
-
-#         img_array = np.expand_dims(img_array, axis=0)
-
-#         img_array = img_array / 255.0
-
-#         # Create GradCAM model
-#         grad_model = tf.keras.models.Model(
-#             [model.inputs],
-#             [
-#                 model.get_layer(last_conv_layer_name).output,
-#                 model.output
-#             ]
-#         )
-
-#         # Gradient computation
-#         with tf.GradientTape() as tape:
-
-#             conv_outputs, predictions = grad_model(img_array)
-
-#             predicted_class = tf.argmax(predictions[0])
-
-#             loss = predictions[:, predicted_class]
-
-#         grads = tape.gradient(loss, conv_outputs)
-
-#         pooled_grads = tf.reduce_mean(
-#             grads,
-#             axis=(0,1,2)
-#         )
-
-#         conv_outputs = conv_outputs[0]
-
-#         heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-
-#         heatmap = tf.squeeze(heatmap)
-
-#         # Normalize
-#         heatmap = np.maximum(heatmap, 0)
-
-#         heatmap = heatmap / (np.max(heatmap) + 1e-8)
-
-#         heatmap = np.where(
-#             heatmap > 0.4,
-#             heatmap,
-#             0
-#         )
-
-#         # Original image
-#         original_img = cv2.imread(self.pimage.path)
-
-#         original_img = cv2.resize(
-#             original_img,
-#             (224,224)
-#         )
-
-#         # Resize heatmap
-#         heatmap = cv2.resize(
-#             heatmap,
-#             (224,224)
-#         )
-
-#         heatmap = np.uint8(255 * heatmap)
-
-#         heatmap = cv2.applyColorMap(
-#             heatmap,
-#             cv2.COLORMAP_JET
-#         )
-
-#         # Overlay
-#         superimposed_img = cv2.addWeighted(
-#             original_img,
-#             0.75,
-#             heatmap,
-#             0.45,
-#             0
-#         )
-
-#         # Convert to image
-#         image = Image.fromarray(
-#             cv2.cvtColor(
-#                 superimposed_img,
-#                 cv2.COLOR_BGR2RGB
-#             )
-#         )
-
-#         buffer = BytesIO()
-
-#         image.save(buffer, format='PNG')
-
-#         file_name = f'heatmap_{self.pk}.png'
-
-#         self.heatmap_image.save(
-#             file_name,
-#             ContentFile(buffer.getvalue()),
-#             save=False
-#         )
-
-#     def save(self,*args,**kwargs): # code pre trained model and  the whole classification take place
-#         super().save(*args, **kwargs)
-
-#         if not self.pimage or self.classified:
-#             return
-
-#         try:
-#             self.classified = self.classify_image()
-
-#             classification_result = self.classified.split("(")[0].strip()
-
-#             # Extract confidence
-#             confidence_text = self.classified.split("(")[-1]
-
-#             confidence_text = confidence_text.replace("%)", "")
-
-#             self.confidence_score = float(confidence_text)
-
-#             # Generate GradCAM
-#             self.generate_gradcam()
-
-#             Patientdb.objects.filter(pk=self.pk).update(
-#                 classified=classification_result,
-#                 confidence_score=self.confidence_score,
-#                 heatmap_image=self.heatmap_image
-#             )
-
-#         except Exception as e:
-#             print('classification failed',e)
-#             traceback.print_exc()
-#             Patientdb.objects.filter(pk=self.pk).update(classified='Classification failed')
-
-
