@@ -9,7 +9,7 @@ import json
 import traceback
 
 model_dir = os.path.dirname(os.path.abspath(__file__))
-h5_path = os.path.join(model_dir, 'best_model (1).h5')
+h5_path = os.path.join(model_dir, 'best_model.h5')
 onnx_path = os.path.join(model_dir, 'model.onnx')
 
 print(f"=== ONNX Conversion Script ===")
